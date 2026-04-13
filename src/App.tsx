@@ -35,6 +35,7 @@ export default function App() {
     runSelfPlay,
     stopSelfPlay,
     resetLearnedModel,
+    setSelfPlayDecayEpsilonAndAlpha,
   } = useTicTacToe();
 
   const [batchCount, setBatchCount] = useState(200);
@@ -165,6 +166,39 @@ export default function App() {
                 )}
               </div>
             )}
+            {ui.mode === 0 && (
+              <label
+                className="inline"
+                style={{ marginTop: "0.55rem", display: "flex", alignItems: "center" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={ui.selfPlayDecayEpsilonAndAlpha}
+                  disabled={ui.selfPlayRunning}
+                  onChange={(e) =>
+                    setSelfPlayDecayEpsilonAndAlpha(e.target.checked)
+                  }
+                />
+                Linear decay ε and α to 0 over the batch
+              </label>
+            )}
+            {ui.mode === 0 && ui.selfPlayStats !== null && (
+              <div
+                className="self-play-stats"
+                style={{ marginTop: "0.65rem" }}
+                aria-live="polite"
+              >
+                <span className="muted">Batch results: </span>
+                <strong className="current-x">X wins {ui.selfPlayStats.winsX}</strong>
+                <span className="muted"> · </span>
+                <strong className="current-o">O wins {ui.selfPlayStats.winsO}</strong>
+                <span className="muted"> · </span>
+                <strong>Ties {ui.selfPlayStats.ties}</strong>
+                {ui.selfPlayRunning && ui.selfPlayPlayed > 0 && (
+                  <span className="muted"> (in progress)</span>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="panel">
@@ -179,7 +213,7 @@ export default function App() {
             </label>
             <div className="row" style={{ marginTop: "0.5rem" }}>
               <label className="inline">
-                ε
+                Random-move chance (ε)
                 <input
                   type="range"
                   min={0}

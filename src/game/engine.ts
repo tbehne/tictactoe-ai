@@ -1,4 +1,4 @@
-import type { Cell, GameState, Player } from "./types";
+import type { Cell, GameState } from "./types";
 import { BOARD_LEN, otherPlayer } from "./types";
 import { checkTerminal } from "./winning";
 

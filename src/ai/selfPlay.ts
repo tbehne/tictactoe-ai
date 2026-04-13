@@ -1,7 +1,8 @@
 import type { GameState } from "../game/types";
-import { applyMove, createInitialState, legalMoves } from "../game/engine";
+import { applyMove, createInitialState } from "../game/engine";
 import type { AIMoveSelector, AIMoveOptions, GameStep } from "./types";
 import { boardToKey } from "../game/engine";
+import { TableQModel } from "./tableModel";
 
 export type SelfPlayEpisodeResult = {
   finalState: GameState;
@@ -30,6 +31,27 @@ export function playOneEpisode(
   return { finalState: state, trajectory, outcomeForX };
 }
 
+export type SelfPlayBatchStats = {
+  winsX: number;
+  winsO: number;
+  ties: number;
+};
+
+function addOutcome(stats: SelfPlayBatchStats, outcomeForX: -1 | 0 | 1): void {
+  if (outcomeForX === 1) stats.winsX += 1;
+  else if (outcomeForX === -1) stats.winsO += 1;
+  else stats.ties += 1;
+}
+
+/**
+ * Linear factor for game index `gameIndex` (0-based): 1 on the first game, 0 on the last.
+ * Single-game batches use factor 1 for that game.
+ */
+export function linearDecayFactor(gameIndex: number, totalGames: number): number {
+  if (totalGames <= 1) return 1;
+  return 1 - gameIndex / (totalGames - 1);
+}
+
 export type ChunkedSelfPlayOptions = {
   totalGames: number;
   chunkSize: number;
@@ -39,8 +61,16 @@ export type ChunkedSelfPlayOptions = {
   onChunk: (info: {
     gamesPlayed: number;
     lastResult: SelfPlayEpisodeResult | null;
+    stats: SelfPlayBatchStats;
   }) => void;
   signal?: { aborted: boolean };
+  /**
+   * When true (and `ai` is a `TableQModel`), ε and learning rate scale linearly from
+   * `epsilonStart` / `learningRateStart` down to 0 over the batch.
+   */
+  decayEpsilonAndAlpha?: boolean;
+  epsilonStart?: number;
+  learningRateStart?: number;
 };
 
 /**
@@ -48,7 +78,11 @@ export type ChunkedSelfPlayOptions = {
  */
 export function runSelfPlayChunked(
   opts: ChunkedSelfPlayOptions,
-): Promise<{ gamesPlayed: number; aborted: boolean }> {
+): Promise<{
+  gamesPlayed: number;
+  aborted: boolean;
+  stats: SelfPlayBatchStats;
+}> {
   const {
     totalGames,
     chunkSize,
@@ -57,25 +91,56 @@ export function runSelfPlayChunked(
     moveOptions,
     onChunk,
     signal,
+    decayEpsilonAndAlpha = false,
+    epsilonStart: epsilonStartOpt,
+    learningRateStart: learningRateStartOpt,
   } = opts;
+
+  const tableAi = ai instanceof TableQModel ? ai : null;
+  const decay =
+    Boolean(decayEpsilonAndAlpha) && tableAi !== null && totalGames >= 1;
+  const lrAtBatchStart = tableAi?.learningRate ?? 0.2;
+  const eps0 = epsilonStartOpt ?? moveOptions.epsilon;
+  const lr0 = learningRateStartOpt ?? lrAtBatchStart;
+
   return new Promise((resolve) => {
     let played = 0;
     let last: SelfPlayEpisodeResult | null = null;
+    const stats: SelfPlayBatchStats = { winsX: 0, winsO: 0, ties: 0 };
+
+    const finish = (result: {
+      gamesPlayed: number;
+      aborted: boolean;
+      stats: SelfPlayBatchStats;
+    }) => {
+      if (tableAi) tableAi.learningRate = lrAtBatchStart;
+      resolve(result);
+    };
 
     const step = () => {
       if (signal?.aborted) {
-        resolve({ gamesPlayed: played, aborted: true });
+        finish({ gamesPlayed: played, aborted: true, stats: { ...stats } });
         return;
       }
       const end = Math.min(played + chunkSize, totalGames);
       for (; played < end; played++) {
         if (signal?.aborted) break;
-        last = playOneEpisode(ai, rng, moveOptions);
+        const factor = decay ? linearDecayFactor(played, totalGames) : 1;
+        const epOpts: AIMoveOptions = decay
+          ? { ...moveOptions, epsilon: eps0 * factor }
+          : moveOptions;
+        last = playOneEpisode(ai, rng, epOpts);
+        if (decay) tableAi!.learningRate = lr0 * factor;
+        addOutcome(stats, last.outcomeForX);
         ai.learnFromGame(last.trajectory, last.outcomeForX);
       }
-      onChunk({ gamesPlayed: played, lastResult: last });
+      onChunk({ gamesPlayed: played, lastResult: last, stats: { ...stats } });
       if (played >= totalGames || signal?.aborted) {
-        resolve({ gamesPlayed: played, aborted: Boolean(signal?.aborted) });
+        finish({
+          gamesPlayed: played,
+          aborted: Boolean(signal?.aborted),
+          stats: { ...stats },
+        });
         return;
       }
       setTimeout(step, 0);

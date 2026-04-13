@@ -8,7 +8,7 @@ import {
   loadFromStorage,
   saveToStorage,
 } from "../ai/persistence";
-import { runSelfPlayChunked } from "../ai/selfPlay";
+import { runSelfPlayChunked, type SelfPlayBatchStats } from "../ai/selfPlay";
 
 export type GameMode = 0 | 1 | 2;
 
@@ -26,6 +26,10 @@ export type UiState = {
   selfPlayRunning: boolean;
   selfPlayPlayed: number;
   selfPlayTotal: number;
+  /** Cumulative results for the current or last self-play batch (0-player mode). */
+  selfPlayStats: SelfPlayBatchStats | null;
+  /** Linearly reduce ε and α to 0 over each self-play batch. */
+  selfPlayDecayEpsilonAndAlpha: boolean;
 };
 
 function outcomeForXFromState(game: GameState): -1 | 0 | 1 {
@@ -67,6 +71,8 @@ export function useTicTacToe() {
     selfPlayRunning: false,
     selfPlayPlayed: 0,
     selfPlayTotal: 0,
+    selfPlayStats: null,
+    selfPlayDecayEpsilonAndAlpha: false,
   }));
 
   uiRef.current = ui;
@@ -81,6 +87,7 @@ export function useTicTacToe() {
       epsilon: s.epsilon,
       aiTraining: s.aiTraining,
       persistEnabled: s.persistEnabled,
+      selfPlayDecayEpsilonAndAlpha: s.selfPlayDecayEpsilonAndAlpha,
     });
   }, [model]);
 
@@ -105,6 +112,8 @@ export function useTicTacToe() {
         aiTraining: saved.aiTraining,
         persistEnabled: saved.persistEnabled,
         learningRate: saved.learningRate,
+        selfPlayDecayEpsilonAndAlpha:
+          saved.selfPlayDecayEpsilonAndAlpha === true,
       }));
     }
   }, [model]);
@@ -245,6 +254,14 @@ export function useTicTacToe() {
     };
   }, [ui.game, ui.mode, ui.humanPlayer, ui.aiTraining, ui.epsilon, model, rng, playIndex]);
 
+  const setSelfPlayDecayEpsilonAndAlpha = useCallback(
+    (selfPlayDecayEpsilonAndAlpha: boolean) => {
+      setUi((s) => ({ ...s, selfPlayDecayEpsilonAndAlpha }));
+      queueMicrotask(() => schedulePersist());
+    },
+    [schedulePersist],
+  );
+
   const runSelfPlay = useCallback(
     (totalGames: number) => {
       const snap = uiRef.current;
@@ -255,13 +272,21 @@ export function useTicTacToe() {
         training: snap.aiTraining,
         epsilon: snap.epsilon,
       };
+      const learningRateStart = model.learningRate;
+      const decayNote = snap.selfPlayDecayEpsilonAndAlpha
+        ? " · linear decay ε and α → 0"
+        : "";
 
       setUi((s) => ({
         ...s,
         selfPlayRunning: true,
         selfPlayPlayed: 0,
         selfPlayTotal: totalGames,
-        historyLog: [...s.historyLog, `--- Self-play ×${totalGames} ---`],
+        selfPlayStats: { winsX: 0, winsO: 0, ties: 0 },
+        historyLog: [
+          ...s.historyLog,
+          `--- Self-play ×${totalGames}${decayNote} ---`,
+        ],
       }));
 
       void runSelfPlayChunked({
@@ -270,11 +295,15 @@ export function useTicTacToe() {
         ai: model,
         rng,
         moveOptions,
+        decayEpsilonAndAlpha: snap.selfPlayDecayEpsilonAndAlpha,
+        epsilonStart: snap.epsilon,
+        learningRateStart,
         signal: selfPlayAbort.current,
-        onChunk: ({ gamesPlayed, lastResult }) => {
+        onChunk: ({ gamesPlayed, lastResult, stats }) => {
           setUi((s) => ({
             ...s,
             selfPlayPlayed: gamesPlayed,
+            selfPlayStats: stats,
             game: lastResult?.finalState ?? s.game,
             lastScores:
               lastResult && lastResult.finalState.status === "playing"
@@ -282,17 +311,19 @@ export function useTicTacToe() {
                 : [],
           }));
         },
-      }).then(({ gamesPlayed, aborted }) => {
+      }).then(({ gamesPlayed, aborted, stats }) => {
         selfPlayRunningRef.current = false;
+        const summary = `Results: X wins ${stats.winsX}, O wins ${stats.winsO}, ties ${stats.ties}`;
         setUi((s) => ({
           ...s,
           selfPlayRunning: false,
           selfPlayPlayed: gamesPlayed,
+          selfPlayStats: stats,
           historyLog: [
             ...s.historyLog,
             aborted
-              ? `Self-play stopped at ${gamesPlayed} games`
-              : `Self-play finished: ${gamesPlayed} games`,
+              ? `Self-play stopped at ${gamesPlayed} games — ${summary}`
+              : `Self-play finished: ${gamesPlayed} games — ${summary}`,
           ],
         }));
         schedulePersist();
@@ -355,5 +386,6 @@ export function useTicTacToe() {
     runSelfPlay,
     stopSelfPlay,
     resetLearnedModel,
+    setSelfPlayDecayEpsilonAndAlpha,
   };
 }

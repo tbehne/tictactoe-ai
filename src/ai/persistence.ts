@@ -7,6 +7,8 @@ export type PersistedModel = {
   epsilon: number;
   aiTraining: boolean;
   persistEnabled: boolean;
+  /** Linear decay of ε and α during 0-player self-play batches */
+  selfPlayDecayEpsilonAndAlpha?: boolean;
 };
 
 export function defaultPersisted(): Omit<PersistedModel, "q"> & { q: Record<string, number> } {
